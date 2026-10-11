@@ -40,7 +40,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /** GikkuBuddy: lightweight native-only Kodular extension; remote assets, Gemini Live, sensors. */
-@DesignerComponent(version = 6, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
+@DesignerComponent(version = 7, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
 @SimpleObject(external = true)
 @UsesPermissions(permissionNames = "android.permission.INTERNET,android.permission.RECORD_AUDIO,android.permission.MODIFY_AUDIO_SETTINGS,android.permission.VIBRATE")
 public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEventListener, OnDestroyListener {
@@ -392,8 +392,18 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             JSONObject setup = new JSONObject().put("model", "models/" + model).put("generationConfig", config);
             setup.put("systemInstruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt))));
             setup.put("tools", new JSONArray().put(new JSONObject().put("functionDeclarations", new JSONArray().put(def))));
-            send(new JSONObject().put("setup", setup).toString());
-        } catch (Exception e) { error("Gemini setup: " + e.getMessage()); }
+            NativeWebSocket ws = socket;
+            if (ws == null || !ws.send(new JSONObject().put("setup", setup).toString())) {
+                String why = ws == null ? "Socket missing" : ws.sendError();
+                status("send_failed", why);
+                error("Gemini setup send failed: " + why);
+                if (ws != null) ws.close();
+            } else status("awaiting_setup", "Setup frame sent; waiting for Google's setupComplete");
+        } catch (Exception e) {
+            status("setup_error", e.toString());
+            error("Gemini setup: " + e.getMessage());
+            if (socket != null) socket.close();
+        }
     }
     private void onServerMessage(String text) {
         try {
@@ -802,6 +812,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
         private final Object writeLock = new Object();
         private final SecureRandom random = new SecureRandom();
         private volatile boolean running = true;
+        private volatile String sendFailure = "";
         private SSLSocket tls;
         private InputStream input;
         private OutputStream output;
@@ -810,7 +821,11 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             Thread thread = new Thread(new Runnable() { @Override public void run() { connectAndRead(); } }, "GikkuBuddy-WebSocket");
             thread.start();
         }
-        void send(String text) { if (!running) return; writeFrame(1, text.getBytes(java.nio.charset.StandardCharsets.UTF_8)); }
+        boolean send(String text) {
+            if (!running || output == null) { sendFailure = "WebSocket is not ready"; return false; }
+            return writeFrame(1, text.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
+        String sendError() { return sendFailure; }
         void close() {
             running = false;
             try { if (tls != null) tls.close(); } catch (Exception ignored) { }
@@ -879,9 +894,9 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             }
             finally { running = false; close(); listener.closed(reason); }
         }
-        private void writeFrame(int opcode, byte[] payload) {
+        private boolean writeFrame(int opcode, byte[] payload) {
             synchronized (writeLock) {
-                if (!running || output == null) return;
+                if (!running || output == null) return false;
                 try {
                     output.write(0x80 | opcode);
                     int size = payload.length;
@@ -891,7 +906,12 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                     byte[] mask = new byte[4]; random.nextBytes(mask); output.write(mask);
                     byte[] data = new byte[size]; for (int i = 0; i < size; i++) data[i] = (byte) (payload[i] ^ mask[i & 3]);
                     output.write(data); output.flush();
-                } catch (IOException ex) { close(); }
+                    return true;
+                } catch (IOException ex) {
+                    sendFailure = ex.getClass().getSimpleName() + ": " + ex.getMessage();
+                    close();
+                    return false;
+                }
             }
         }
         private static int readByte(InputStream in) throws IOException { int b = in.read(); if (b < 0) throw new EOFException(); return b; }
