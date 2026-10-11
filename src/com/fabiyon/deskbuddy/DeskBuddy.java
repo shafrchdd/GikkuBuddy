@@ -5,6 +5,12 @@ import android.app.Activity;
 import android.content.*;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.Canvas;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.BlurMaskFilter;
+import com.google.appinventor.components.runtime.util.YailList;
 import android.graphics.BitmapFactory;
 import android.hardware.*;
 import android.media.*;
@@ -16,10 +22,7 @@ import android.widget.*;
 
 import com.google.appinventor.components.annotations.*;
 import com.google.appinventor.components.common.ComponentCategory;
-import com.google.appinventor.components.runtime.AndroidNonvisibleComponent;
-import com.google.appinventor.components.runtime.AndroidViewComponent;
-import com.google.appinventor.components.runtime.ComponentContainer;
-import com.google.appinventor.components.runtime.OnDestroyListener;
+import com.google.appinventor.components.runtime.*;
 import com.google.appinventor.components.runtime.EventDispatcher;
 
 import org.json.*;
@@ -35,7 +38,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /** GikkuBuddy: lightweight native-only Kodular extension; remote assets, Gemini Live, sensors. */
-@DesignerComponent(version = 3, description = "GikkuBuddy AI Desk Buddy: remote native animations, Gemini Live audio, function-call emotions and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
+@DesignerComponent(version = 4, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
 @SimpleObject(external = true)
 @UsesPermissions(permissionNames = "android.permission.INTERNET,android.permission.RECORD_AUDIO,android.permission.MODIFY_AUDIO_SETTINGS,android.permission.VIBRATE")
 public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEventListener, OnDestroyListener {
@@ -54,6 +57,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private final LruCache<String, Bitmap> bitmaps;
     private FrameLayout stage;
     private ImageView image;
+    private FaceView face;
     private volatile boolean disposed = false, downloading = false, connected = false, listening = false;
     private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-2.5-flash-native-audio-preview-09-2025";
     private int fps = 15, frameNumber = 0, activePriority = 0;
@@ -89,50 +93,12 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                 activePriority = 0;
                 changeEmotion("Idle", true, 0, 0);
             }
-            File[] frames;
-            synchronized (sequences) { frames = sequences.get(emotion); }
-            if (image != null && frames != null && frames.length > 0) {
-                final File target = frames[Math.min(frameNumber, frames.length - 1)];
-                Bitmap cached = bitmaps.get(target.getAbsolutePath());
-                if (cached != null) image.setImageBitmap(cached);
-                else decoder.execute(new Runnable() {
-                    @Override public void run() {
-                        final String key = target.getAbsolutePath();
-                        Bitmap loaded = bitmaps.get(key);
-                        if (loaded == null) {
-                            BitmapFactory.Options opts = new BitmapFactory.Options();
-                            opts.inPreferredConfig = Bitmap.Config.RGB_565;
-                            loaded = BitmapFactory.decodeFile(key, opts);
-                            if (loaded != null) bitmaps.put(key, loaded);
-                        }
-                        final Bitmap result = loaded;
-                        main.post(new Runnable() {
-                            @Override public void run() {
-                                if (!disposed && image != null && result != null && emotion.equals(target.getParentFile().getName())) image.setImageBitmap(result);
-                            }
-                        });
-                    }
-                });
-                if (frameNumber < frames.length - 1) frameNumber++;
-                else if (loop) frameNumber = 0;
-                final int next = Math.min(frameNumber, frames.length - 1);
-                final File upcoming = frames[next];
-                if (bitmaps.get(upcoming.getAbsolutePath()) == null) decoder.execute(new Runnable() {
-                    @Override public void run() {
-                        String k = upcoming.getAbsolutePath();
-                        if (bitmaps.get(k) == null) {
-                            BitmapFactory.Options o = new BitmapFactory.Options(); o.inPreferredConfig = Bitmap.Config.RGB_565;
-                            Bitmap b = BitmapFactory.decodeFile(k, o);
-                            if (b != null) bitmaps.put(k, b);
-                        }
-                    }
-                });
-            }
-            main.postDelayed(this, Math.max(33, 1000 / Math.max(1, fps)));
+            if (face != null) face.invalidate();
+            main.postDelayed(this, Math.max(16, 1000 / Math.max(1, fps)));
         }
     };
 
-    @SimpleFunction(description = "Attach buddy's native animation view inside a Kodular arrangement.")
+    @SimpleFunction(description = "Attach the procedurally drawn neon face to a Kodular arrangement.")
     public void AttachTo(final AndroidViewComponent arrangement) {
         main.post(new Runnable() { @Override public void run() {
             if (disposed) return;
@@ -140,11 +106,10 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             if (!(target instanceof ViewGroup)) { error("AttachTo needs an Arrangement component"); return; }
             if (stage != null && stage.getParent() instanceof ViewGroup) ((ViewGroup) stage.getParent()).removeView(stage);
             FrameLayout host = new FrameLayout(activity);
-            ImageView sprite = new ImageView(activity);
-            sprite.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            host.addView(sprite, new FrameLayout.LayoutParams(-1, -1));
+            FaceView drawn = new FaceView(activity);
+            host.addView(drawn, new FrameLayout.LayoutParams(-1, -1));
             ((ViewGroup) target).addView(host, new ViewGroup.LayoutParams(-1, -1));
-            stage = host; image = sprite;
+            stage = host; face = drawn;
             stage.setOnTouchListener(new View.OnTouchListener() {
                 @Override public boolean onTouch(View v, MotionEvent event) {
                     if (event.getAction() == MotionEvent.ACTION_DOWN) {
@@ -158,62 +123,9 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
         }});
     }
 
-    @SimpleFunction(description = "Download the GitHub Release emotion ZIP on first run; reuse existing cached pack offline.")
-    public void InitializeAssets(String url) {
-        if (downloading || disposed) return;
-        downloading = true;
-        final String manifestUrl = url == null || url.trim().length() == 0 ? MANIFEST_URL : url.trim();
-        network.execute(new Runnable() { @Override public void run() {
-            File root = new File(activity.getFilesDir(), "gikku_buddy");
-            File active = new File(root, "emotions");
-            File staging = new File(root, "staging");
-            File backup = new File(root, "backup");
-            File zip = new File(root, "download.tmp");
-            boolean usedCache = false;
-            try {
-                if (!root.exists() && !root.mkdirs()) throw new IOException("Cannot create storage folder");
-                JSONObject meta;
-                try { meta = new JSONObject(fetchString(manifestUrl, 65536)); }
-                catch (Exception fetchFailure) {
-                    if (loadInstalled(active)) { notifyAssetsReady(active, readVersion(root)); usedCache = true; return; }
-                    throw new IOException("Manifest unavailable: " + fetchFailure.getMessage());
-                }
-                String remoteVersion = meta.getString("version");
-                String expectedSha = meta.getString("sha256");
-                String packUrl = meta.getString("url");
-                if (!packUrl.startsWith("https://") || !expectedSha.matches("[0-9a-fA-F]{64}")) throw new IOException("Unsafe manifest");
-                if (remoteVersion.equals(readVersion(root)) && loadInstalled(active)) { notifyAssetsReady(active, remoteVersion); usedCache = true; return; }
-                downloadZip(packUrl, zip, expectedSha);
-                deleteTree(staging);
-                if (!staging.mkdirs()) throw new IOException("Cannot create staging folder");
-                unpack(zip, staging);
-                if (!validatePack(staging)) throw new IOException("Incorrect emotion folders or frames");
-                deleteTree(backup);
-                if (active.exists() && !active.renameTo(backup)) throw new IOException("Cannot back up existing pack");
-                if (!staging.renameTo(active)) {
-                    if (backup.exists()) backup.renameTo(active);
-                    throw new IOException("Cannot activate downloaded pack");
-                }
-                if (!loadInstalled(active)) throw new IOException("Pack activation invalid");
-                version = remoteVersion;
-                writeString(new File(root, "version.txt"), remoteVersion);
-                deleteTree(backup);
-                bitmaps.evictAll();
-                notifyAssetsReady(active, remoteVersion);
-            } catch (Exception ex) {
-                if (!usedCache && loadInstalled(active)) {
-                    final String msg = "Update failed; using offline cache: " + ex.getMessage();
-                    main.post(new Runnable() { @Override public void run() { AssetsError(msg); } });
-                    notifyAssetsReady(active, readVersion(root));
-                } else if (!usedCache) {
-                    final String msg = ex.getMessage();
-                    main.post(new Runnable() { @Override public void run() { AssetsError(msg); } });
-                }
-            } finally {
-                if (zip.exists()) zip.delete();
-                downloading = false;
-            }
-        }});
+    @SimpleFunction(description = "Compatibility: v4 animations are built in and require no ZIP. Fires AssetsReady immediately.")
+    public void InitializeAssets(String ignoredUrl) {
+        main.post(new Runnable() { @Override public void run() { AssetsReady("builtin://procedural", "4"); } });
     }
 
     private static HttpURLConnection connection(String src) throws IOException {
@@ -337,31 +249,25 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
         f.delete();
     }
     @SimpleFunction public void CheckForUpdates() { InitializeAssets(""); }
-    @SimpleFunction public void ClearEmotionCache() {
-        network.execute(new Runnable() { @Override public void run() {
-            synchronized (sequences) { sequences.clear(); }
-            bitmaps.evictAll();
-            deleteTree(new File(activity.getFilesDir(), "gikku_buddy"));
-            main.post(new Runnable() { @Override public void run() { AssetsCleared(); } });
-        } });
-    }
-    @SimpleFunction public String AvailableEmotions() { return new JSONArray(Arrays.asList(EMOTIONS)).toString(); }
-    @SimpleFunction public void SetFPS(int requested) { fps = Math.max(1, Math.min(30, requested)); }
+    @SimpleFunction public void ClearEmotionCache() { AssetsCleared(); }
+    @SimpleFunction(description = "Return native Kodular list of built-in emotions.")
+    public YailList AvailableEmotions() { return YailList.makeList(Arrays.asList(EMOTIONS)); }
+    @SimpleFunction public void SetFPS(int requested) { fps = Math.max(1, Math.min(60, requested)); }
     @SimpleFunction public void SetEmotion(final String name, final boolean repeat, final int durationMs) {
         main.post(new Runnable() { @Override public void run() { changeEmotion(name, repeat, durationMs, 10); } });
     }
     private void changeEmotion(String name, boolean repeat, int duration, int newPriority) {
         if (!EMOTION_SET.contains(name)) { error("Unknown emotion: " + name); return; }
-        synchronized (sequences) { if (!sequences.containsKey(name)) { error("Assets have not finished loading"); return; } }
         long now = SystemClock.uptimeMillis();
         if (activePriority > newPriority && emotionExpires > now) return;
         emotion = name; frameNumber = 0; loop = repeat;
         activePriority = newPriority;
         emotionExpires = duration > 0 ? now + Math.min(duration, 120000) : 0;
+        if (face != null) face.invalidate();
         EmotionChanged(name);
     }
     @SimpleFunction public String CurrentEmotion() { return emotion; }
-    @SimpleFunction public boolean AssetsInstalled() { return validatePack(new File(activity.getFilesDir(), "gikku_buddy/emotions")); }
+    @SimpleFunction public boolean AssetsInstalled() { return true; }
     @SimpleFunction public void SetInstructions(String instructions) { if (instructions != null) prompt = instructions; }
     @SimpleFunction public void SetModel(String name) { if (name != null && name.matches("[A-Za-z0-9._-]+")) model = name; }
     @SimpleFunction public void SetVoice(String name) { if (name != null && name.matches("[A-Za-z0-9_-]+")) voice = name; }
@@ -602,6 +508,136 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     @SimpleEvent public void BatteryChanged(int level, boolean charging) { EventDispatcher.dispatchEvent(this, "BatteryChanged", level, charging); }
     @SimpleEvent public void Error(String message) { EventDispatcher.dispatchEvent(this, "Error", message); }
 
+    /** Procedural rendering based on the user's original black/cyan two-eye artwork. */
+    private final class FaceView extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+        private final RectF rect = new RectF();
+        private final int cyan = 0xFF9BFFFF, cyanBright = 0xFFCCFFFF, red = 0xFFFF385A, pink = 0xFFFF4D9E;
+        private long origin = SystemClock.uptimeMillis();
+        FaceView(Context ctx) { super(ctx); setLayerType(View.LAYER_TYPE_SOFTWARE, null); setBackgroundColor(0xFF000000); }
+        private void stroke(int color, float width, float glow) {
+            p.reset(); p.setAntiAlias(true); p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.ROUND);
+            p.setStrokeJoin(Paint.Join.ROUND); p.setStrokeWidth(width); p.setColor(color);
+            if (glow > 0) p.setShadowLayer(glow, 0, 0, color);
+        }
+        private void fill(int color, float glow) {
+            p.reset(); p.setAntiAlias(true); p.setStyle(Paint.Style.FILL); p.setColor(color);
+            if (glow > 0) p.setShadowLayer(glow, 0, 0, color);
+        }
+        private void oval(Canvas c, float cx, float cy, float rx, float ry, int color, float glow) {
+            fill(color, glow); rect.set(cx-rx, cy-ry, cx+rx, cy+ry); c.drawOval(rect,p);
+        }
+        private void arc(Canvas c, float cx, float cy, float rx, float ry, float start, float sweep, int color, float width, float glow) {
+            stroke(color,width,glow); rect.set(cx-rx,cy-ry,cx+rx,cy+ry); c.drawArc(rect,start,sweep,false,p);
+        }
+        private void line(Canvas c,float x1,float y1,float x2,float y2,int color,float width,float glow){
+            stroke(color,width,glow);c.drawLine(x1,y1,x2,y2,p);
+        }
+        private void heart(Canvas c,float x,float y,float scale,int color){
+            c.save();c.translate(x,y);c.scale(scale,scale);
+            path.reset();path.moveTo(0,13);path.cubicTo(-42,-13,-19,-36,0,-18);path.cubicTo(19,-36,42,-13,0,13);
+            fill(color,9);c.drawPath(path,p);c.restore();
+        }
+        private void star(Canvas c,float x,float y,float radius,int color){
+            stroke(color,2,12);c.drawLine(x-radius,y,x+radius,y,p);c.drawLine(x,y-radius,x,y+radius,p);
+            oval(c,x,y,3,3,color,8);
+        }
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            canvas.drawColor(0xFF000000);
+            float w=getWidth(),h=getHeight(); if(w<1||h<1)return;
+            canvas.save();float scale=Math.min(w/400f,h/270f);canvas.translate(w/2f,h/2f);canvas.scale(scale,scale);
+            float t=(SystemClock.uptimeMillis()-origin)/1000f;
+            String e=emotion;
+            int col=(e.equals("angry")||e.equals("love"))?(e.equals("angry")?red:pink):cyan;
+            float bob=(float)Math.sin(t*2.0)*2.2f;
+            if(e.equals("excited")||e.equals("charged"))bob=(float)Math.sin(t*7)*4;
+            if(e.equals("dizzy"))canvas.rotate((float)Math.sin(t*3)*6);
+            if(e.equals("scared"))canvas.translate((float)Math.sin(t*29)*3,0);
+            canvas.translate(0,bob);
+            float blink=(float)(t%4.3);float eyeH=(blink>4.05f&&blink<4.19f)?0.10f:1f;
+            if(e.equals("sleeping"))eyeH=.15f;
+            if(e.equals("tired"))eyeH=.60f;
+            if(e.equals("shy"))eyeH=.78f;
+            if(e.equals("focus"))eyeH=.8f;
+            float gaze=(float)Math.sin(t*.8)*2.5f;
+            for(int side=-1;side<=1;side+=2){
+                float x=side*66;
+                float ey=-1;
+                if(e.equals("bored"))ey=3;
+                if(e.equals("angry"))ey=2;
+                float rx=(e.equals("excited")?31:32), ry=32*eyeH;
+                if(e.equals("sleeping")){
+                    arc(canvas,x,4,34,15,180,180,col,5,13);
+                } else if(e.equals("dizzy")) {
+                    arc(canvas,x,0,31,18,180,180,col,6,14);
+                    for(int k=0;k<3;k++)arc(canvas,0,0,11+k*9,11+k*9,(t*95+k*120)%360,140,col,2,9);
+                } else if(e.equals("love")){
+                    heart(canvas,x,0,1.6f,col);
+                } else {
+                    oval(canvas,x,ey,rx,ry,col,19);
+                    if(e.equals("curious_alt")||e.equals("sad")||e.equals("proud")||e.equals("updating")||e.equals("angry")||e.equals("guilt")){
+                        if(e.equals("updating")){
+                            line(canvas,x,ey-25,x,ey+25,0xFF003F4C,6,0);
+                        } else if(e.equals("angry")){
+                            oval(canvas,x-side*5,ey,11,13,0xFF350A13,0);
+                            oval(canvas,x-side*5,ey,5,7,0xFFFFE0E4,0);
+                        } else {
+                            oval(canvas,x+gaze,ey+1,10,12,0xFF003D49,0);
+                            if(e.equals("guilt"))oval(canvas,x+gaze-3,ey-3,3,4,cyanBright,2);
+                        }
+                    }
+                    if(e.equals("charged")){
+                        for(int k=-1;k<=1;k++)line(canvas,x-29,ey+k*12,x+29,ey+k*12,0xFF2A9FA9,2,3);
+                    }
+                    if(e.equals("chilling"))for(int k=0;k<3;k++)arc(canvas,x,ey,rx+7+k*6,ry+7+k*6,0,360,col,2,9);
+                    if(e.equals("excited")){
+                        for(int k=0;k<8;k++){
+                            float a=(float)(k*Math.PI/4+t*.6);
+                            float sx=x+(float)Math.cos(a)*50,sy=ey+(float)Math.sin(a)*50;
+                            star(canvas,sx,sy,4+(k%3)*2,col);
+                        }
+                    }
+                }
+                if(!e.equals("sleeping")&&!e.equals("dizzy")&& !e.equals("chilling")){
+                    float browY=-50;
+                    if(e.equals("angry")||e.equals("focus")){
+                        line(canvas,x-30,browY-side*12,x+30,browY+side*12,col,5,10);
+                    }else if(e.equals("low_battery")||e.equals("sad")){
+                        line(canvas,x-28,browY+side*10,x+27,browY-side*7,col,4,8);
+                    }else if(e.equals("tired")){
+                        line(canvas,x-27,browY+10,x+28,browY+13,col,3,6);
+                    }else{
+                        arc(canvas,x,browY+18,34,18,200,140,col,4,10);
+                    }
+                }
+            }
+            if(e.equals("charging")){
+                for(int k=0;k<5;k++)arc(canvas,0,0,122+k*7,83+k*4,(t*75+k*60)%360,50,col,2,6);
+                stroke(col,3,9);rect.set(147,-45,164,40);canvas.drawRoundRect(rect,3,3,p);
+                fill(col,8);rect.set(150,32-70*(.5f+.5f*(float)Math.sin(t)),161,36);canvas.drawRect(rect,p);
+            }
+            if(e.equals("low_battery")){
+                stroke(col,2,6);canvas.drawLine(-110,-20,-123,20,p);canvas.drawLine(110,-20,123,20,p);
+            }
+            if(e.equals("updating")){
+                arc(canvas,0,0,157,92,(t*100)%360,75,col,3,12);
+            }
+            if(e.equals("thinking")){
+                for(int i=0;i<3;i++)oval(canvas,115+i*14,-75-i*12,4+i*2,4+i*2,col,9);
+            }
+            if(e.equals("proud")){
+                for(int i=0;i<4;i++)star(canvas,-155+i*103,80+(float)Math.sin(t+i)*10,6,col);
+            }
+            if(e.equals("shy")){
+                for(int i=0;i<3;i++)oval(canvas,-130+i*14,53,3,3,pink,7);
+                for(int i=0;i<3;i++)oval(canvas,102+i*14,53,3,3,pink,7);
+            }
+            canvas.restore();
+        }
+    }
+
     /** RFC6455 minimal binary-safe TLS websocket. No extra JARs required. */
     private static final class NativeWebSocket {
         interface Listener { void opened(); void message(String text); void closed(String reason); }
@@ -688,7 +724,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                     int size = payload.length;
                     if (size < 126) output.write(0x80 | size);
                     else if (size <= 65535) { output.write(0x80 | 126); output.write((size >>> 8) & 255); output.write(size & 255); }
-                    else { output.write(0x80 | 127); for (int i = 7; i >= 0; i--) output.write((int) (((long) size >>> (8 * i)) & 255L)); }
+                    else { output.write(0x80 | 127); for (int i = 7; i >= 0; i--) output.write(((long) size >>> (8 * i)) & 255); }
                     byte[] mask = new byte[4]; random.nextBytes(mask); output.write(mask);
                     byte[] data = new byte[size]; for (int i = 0; i < size; i++) data[i] = (byte) (payload[i] ^ mask[i & 3]);
                     output.write(data); output.flush();
