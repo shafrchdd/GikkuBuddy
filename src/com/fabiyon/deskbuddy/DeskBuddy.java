@@ -40,7 +40,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /** GikkuBuddy: lightweight native-only Kodular extension; remote assets, Gemini Live, sensors. */
-@DesignerComponent(version = 7, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
+@DesignerComponent(version = 8, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
 @SimpleObject(external = true)
 @UsesPermissions(permissionNames = "android.permission.INTERNET,android.permission.RECORD_AUDIO,android.permission.MODIFY_AUDIO_SETTINGS,android.permission.VIBRATE")
 public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEventListener, OnDestroyListener {
@@ -61,7 +61,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private ImageView image;
     private FaceView face;
     private volatile boolean disposed = false, downloading = false, connected = false, listening = false;
-    private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-3.1-flash-live-preview";
+    private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-3.8-live";
     private int fps = 15, frameNumber = 0, activePriority = 0;
     private long emotionExpires = 0, lastShake = 0, lastLightEvent = 0, lastProximityEvent = 0;
     private boolean loop = true, sensorEnabled = false;
@@ -353,7 +353,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
         } };
         main.postDelayed(connectionTimeout, 25000);
         try {
-            String endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key="
+            String endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key="
                 + URLEncoder.encode(lastApiKey, "UTF-8");
             socket = new NativeWebSocket(endpoint, new NativeWebSocket.Listener() {
                 @Override public void opened() {
@@ -885,7 +885,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                     if (fragments.size() + payload.length > 8L * 1024 * 1024) throw new IOException("Message too large");
                     fragments.write(payload);
                     if (fin) {
-                        if (priorOpcode == 1) listener.message(new String(fragments.toByteArray(), "UTF-8"));
+                        if (priorOpcode == 1 || priorOpcode == 2) listener.message(new String(fragments.toByteArray(), "UTF-8"));
                         fragments.reset(); priorOpcode = -1;
                     }
                 }
