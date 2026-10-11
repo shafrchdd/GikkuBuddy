@@ -1,0 +1,31 @@
+name: Publish emotion ZIP release
+on:
+  push:
+    branches: [main]
+    paths:
+      - "release-assets/emotions-v1.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify emotion archive checksum
+        shell: bash
+        run: |
+          test -f release-assets/emotions-v1.zip
+          echo "6d05bc1e287888e1ffe52627fdf0e12d5999532e79ffa5f2e352a57b493f9fb3  release-assets/emotions-v1.zip" | sha256sum -c -
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view emotions-v1 >/dev/null 2>&1; then
+            gh release upload emotions-v1 release-assets/emotions-v1.zip --clobber
+          else
+            gh release create emotions-v1 release-assets/emotions-v1.zip --title "GikkuBuddy Emotions v1" --notes "23 emotion folders and 345 animation frames for first-launch download."
+          fi
