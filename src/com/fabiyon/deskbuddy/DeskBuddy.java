@@ -61,7 +61,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private ImageView image;
     private FaceView face;
     private volatile boolean disposed = false, downloading = false, connected = false, listening = false;
-    private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-2.5-flash-native-audio-preview-09-2025";
+    private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-3.8-live";
     private int fps = 15, frameNumber = 0, activePriority = 0;
     private long emotionExpires = 0, lastShake = 0, lastLightEvent = 0, lastProximityEvent = 0;
     private boolean loop = true, sensorEnabled = false;
@@ -292,6 +292,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     @SimpleFunction(description = "Connect to Gemini Live with an API key (prototype; use ephemeral credentials in production).")
     public void Connect(String apiKey) {
         if (apiKey == null || apiKey.trim().isEmpty()) { error("Gemini API key missing"); return; }
+        // The default model is a current Gemini Live model; override with SetModel if needed.
         disconnectInternal();
         final int id = ++connectionId;
         try {
@@ -328,6 +329,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private void onServerMessage(String text) {
         try {
             JSONObject reply = new JSONObject(text);
+            if (reply.has("error")) error("Gemini API: " + reply.optJSONObject("error"));
             if (reply.has("setupComplete")) {
                 connected = true;
                 openSpeaker();
@@ -766,7 +768,12 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                     byte[] mask = masked ? readFully(input, 4) : null;
                     byte[] payload = readFully(input, (int) length);
                     if (masked) for (int i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
-                    if (opcode == 8) { reason = "Server closed socket"; break; }
+                    if (opcode == 8) {
+                        int code = payload.length >= 2 ? ((payload[0] & 255) << 8) | (payload[1] & 255) : 1005;
+                        String detail = payload.length > 2 ? new String(payload, 2, payload.length - 2, "UTF-8") : "";
+                        reason = "Gemini WebSocket closed (" + code + ")" + (detail.isEmpty() ? "" : ": " + detail);
+                        break;
+                    }
                     if (opcode == 9) { writeFrame(10, payload); continue; }
                     if (opcode == 10) continue;
                     if (opcode == 1 || opcode == 2) { fragments.reset(); priorOpcode = opcode; }
