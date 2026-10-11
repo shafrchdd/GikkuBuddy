@@ -40,7 +40,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /** GikkuBuddy: lightweight native-only Kodular extension; remote assets, Gemini Live, sensors. */
-@DesignerComponent(version = 5, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
+@DesignerComponent(version = 6, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
 @SimpleObject(external = true)
 @UsesPermissions(permissionNames = "android.permission.INTERNET,android.permission.RECORD_AUDIO,android.permission.MODIFY_AUDIO_SETTINGS,android.permission.VIBRATE")
 public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEventListener, OnDestroyListener {
@@ -61,7 +61,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private ImageView image;
     private FaceView face;
     private volatile boolean disposed = false, downloading = false, connected = false, listening = false;
-    private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-3.8-live";
+    private String emotion = "Idle", version = "", prompt = "You are GikkuBuddy, a warm, curious, playful desktop AI friend. React naturally. Call set_emotion to change face when a meaningful emotion changes, not on every sentence.", voice = "Puck", model = "gemini-3.1-flash-live-preview";
     private int fps = 15, frameNumber = 0, activePriority = 0;
     private long emotionExpires = 0, lastShake = 0, lastLightEvent = 0, lastProximityEvent = 0;
     private boolean loop = true, sensorEnabled = false;
@@ -83,6 +83,47 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private NativeWebSocket socket;
     private volatile int connectionId = 0;
     private boolean tickerRunning = false;
+    private String lastApiKey = "";
+    private int retryAttempt = 0;
+    private boolean userDisconnected = false;
+    private Runnable connectionTimeout;
+    private Runnable retryTask;
+    private String connectionStage = "idle";
+    private static final int MAX_RETRIES = 3;
+    private void status(final String stage, final String detail) {
+        connectionStage = stage;
+        main.post(new Runnable() { @Override public void run() {
+            if (!disposed) ConnectionStatus(stage, detail);
+        } });
+    }
+    private void cancelConnectionTimers() {
+        if (connectionTimeout != null) main.removeCallbacks(connectionTimeout);
+        if (retryTask != null) main.removeCallbacks(retryTask);
+        connectionTimeout = null; retryTask = null;
+    }
+    private boolean retryable(String reason) {
+        String x = reason == null ? "" : reason.toLowerCase(Locale.US);
+        return !(x.contains("401") || x.contains("403") || x.contains("400")
+          || x.contains("1002") || x.contains("1003") || x.contains("1008")
+          || x.contains("invalid") || x.contains("unauthorized")
+          || x.contains("permission") || x.contains("api key")
+          || x.contains("quota") || x.contains("429") || x.contains("1009"));
+    }
+    private void scheduleRetry(final String why) {
+        if (userDisconnected || disposed || !retryable(why) || retryAttempt >= MAX_RETRIES) {
+            status("failed", why);
+            error("Gemini connection failed [" + connectionStage + "]: " + why);
+            return;
+        }
+        retryAttempt++;
+        final int attempt = retryAttempt;
+        final long delay = Math.min(8000, 1000L << (attempt - 1));
+        status("retrying", "Attempt " + attempt + "/" + MAX_RETRIES + " in " + delay + " ms: " + why);
+        retryTask = new Runnable() { @Override public void run() {
+            if (!disposed && !userDisconnected && attempt == retryAttempt) connectAttempt();
+        } };
+        main.postDelayed(retryTask, delay);
+    }
 
     public DeskBuddy(ComponentContainer container) {
         super(container.$form());
@@ -289,27 +330,55 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     @SimpleFunction public void SetModel(String name) { if (name != null && name.matches("[A-Za-z0-9._-]+")) model = name; }
     @SimpleFunction public void SetVoice(String name) { if (name != null && name.matches("[A-Za-z0-9_-]+")) voice = name; }
 
-    @SimpleFunction(description = "Connect to Gemini Live with an API key (prototype; use ephemeral credentials in production).")
+    @SimpleFunction(description = "Connect to Gemini Live. Automatically retries transient failures up to three times.")
     public void Connect(String apiKey) {
         if (apiKey == null || apiKey.trim().isEmpty()) { error("Gemini API key missing"); return; }
-        // The default model is a current Gemini Live model; override with SetModel if needed.
+        userDisconnected = false;
+        lastApiKey = apiKey.trim();
+        retryAttempt = 0;
+        cancelConnectionTimers();
+        connectAttempt();
+    }
+    private void connectAttempt() {
+        cancelConnectionTimers();
+        ++connectionId;
         disconnectInternal();
-        final int id = ++connectionId;
+        final int id = connectionId;
+        status("connecting", "Opening secure WebSocket");
+        connectionTimeout = new Runnable() { @Override public void run() {
+            if (id != connectionId || connected || disposed || userDisconnected) return;
+            status("timeout", "No setupComplete within 25 seconds");
+            NativeWebSocket pending = socket;
+            if (pending != null) pending.close();
+        } };
+        main.postDelayed(connectionTimeout, 25000);
         try {
-            String endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=" + URLEncoder.encode(apiKey.trim(), "UTF-8");
+            String endpoint = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key="
+                + URLEncoder.encode(lastApiKey, "UTF-8");
             socket = new NativeWebSocket(endpoint, new NativeWebSocket.Listener() {
-                @Override public void opened() { if (id == connectionId) sendSetup(); }
+                @Override public void opened() {
+                    if (id != connectionId) return;
+                    status("configuring", "WebSocket connected; sending Gemini setup");
+                    sendSetup();
+                }
                 @Override public void message(String text) { if (id == connectionId) onServerMessage(text); }
-                @Override public void closed(String reason) {
-                    if (id == connectionId) {
-                        connected = false; listening = false;
-                        final String why = reason;
-                        main.post(new Runnable() { @Override public void run() { Disconnected(why); } });
-                    }
+                @Override public void closed(final String reason) {
+                    if (id != connectionId) return;
+                    connected = false; listening = false;
+                    main.post(new Runnable() { @Override public void run() {
+                        if (id != connectionId || disposed) return;
+                        cancelConnectionTimers();
+                        String why = connectionStage.equals("timeout") ? "Connection/setup timeout (25s)" : reason;
+                        Disconnected(why);
+                        if (!userDisconnected) scheduleRetry(why);
+                    } });
                 }
             });
             socket.start();
-        } catch (Exception e) { error("Connection setup: " + e.getMessage()); }
+        } catch (Exception e) {
+            cancelConnectionTimers();
+            scheduleRetry("Connection setup: " + e.getMessage());
+        }
     }
     private void sendSetup() {
         try {
@@ -329,8 +398,18 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private void onServerMessage(String text) {
         try {
             JSONObject reply = new JSONObject(text);
-            if (reply.has("error")) error("Gemini API: " + reply.optJSONObject("error"));
+            if (reply.has("error")) {
+                String detail = String.valueOf(reply.opt("error"));
+                status("server_error", detail);
+                error("Gemini API: " + detail);
+                if (socket != null) socket.close();
+                return;
+            }
+            if (reply.has("goAway")) status("server_notice", "Gemini session is ending: " + reply.opt("goAway"));
             if (reply.has("setupComplete")) {
+                cancelConnectionTimers();
+                retryAttempt = 0;
+                status("connected", "Gemini setup completed");
                 connected = true;
                 openSpeaker();
                 main.post(new Runnable() { @Override public void run() { Connected(); } });
@@ -449,7 +528,13 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             send(new JSONObject().put("clientContent", new JSONObject().put("turns", new JSONArray().put(turn)).put("turnComplete", true)).toString());
         } catch (Exception e) { error("SendText: " + e.getMessage()); }
     }
-    @SimpleFunction public void Disconnect() { ++connectionId; disconnectInternal(); }
+    @SimpleFunction public void Disconnect() {
+        userDisconnected = true;
+        cancelConnectionTimers();
+        ++connectionId;
+        disconnectInternal();
+        status("disconnected", "Disconnected by user");
+    }
     private void disconnectInternal() {
         listening = false; connected = false;
         NativeWebSocket existing = socket; socket = null;
@@ -519,6 +604,8 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     @Override public void onDestroy() {
         disposed = true;
         main.removeCallbacks(animationTicker);
+        userDisconnected = true;
+        cancelConnectionTimers();
         if (batteryReceiverRegistered) {
             try { activity.unregisterReceiver(batteryReceiver); } catch (Exception ignored) { }
             batteryReceiverRegistered = false;
@@ -539,6 +626,8 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     @SimpleEvent public void FramesLoaded(int emotions, int frames) { EventDispatcher.dispatchEvent(this, "FramesLoaded", emotions, frames); }
     @SimpleEvent public void EmotionChanged(String value) { EventDispatcher.dispatchEvent(this, "EmotionChanged", value); }
     @SimpleEvent public void BuddyTouched(float x, float y) { EventDispatcher.dispatchEvent(this, "BuddyTouched", x, y); }
+    @SimpleEvent(description = "Connection stage and diagnostic details: connecting, configuring, connected, retrying, failed, timeout, server_error, disconnected.")
+    public void ConnectionStatus(String stage, String detail) { EventDispatcher.dispatchEvent(this, "ConnectionStatus", stage, detail); }
     @SimpleEvent public void Connected() { EventDispatcher.dispatchEvent(this, "Connected"); }
     @SimpleEvent public void Disconnected(String reason) { EventDispatcher.dispatchEvent(this, "Disconnected", reason); }
     @SimpleEvent public void Transcript(String text) { EventDispatcher.dispatchEvent(this, "Transcript", text); }
@@ -785,7 +874,9 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                         fragments.reset(); priorOpcode = -1;
                     }
                 }
-            } catch (Exception ex) { reason = ex.getMessage() == null ? "Socket error" : ex.getMessage(); }
+            } catch (Exception ex) {
+                reason = ex.getClass().getSimpleName() + ": " + (ex.getMessage() == null ? "Socket error" : ex.getMessage());
+            }
             finally { running = false; close(); listener.closed(reason); }
         }
         private void writeFrame(int opcode, byte[] payload) {
