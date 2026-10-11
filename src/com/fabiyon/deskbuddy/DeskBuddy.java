@@ -40,7 +40,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /** GikkuBuddy: lightweight native-only Kodular extension; remote assets, Gemini Live, sensors. */
-@DesignerComponent(version = 4, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
+@DesignerComponent(version = 5, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
 @SimpleObject(external = true)
 @UsesPermissions(permissionNames = "android.permission.INTERNET,android.permission.RECORD_AUDIO,android.permission.MODIFY_AUDIO_SETTINGS,android.permission.VIBRATE")
 public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEventListener, OnDestroyListener {
@@ -65,6 +65,15 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     private int fps = 15, frameNumber = 0, activePriority = 0;
     private long emotionExpires = 0, lastShake = 0, lastLightEvent = 0, lastProximityEvent = 0;
     private boolean loop = true, sensorEnabled = false;
+    private volatile int batteryPercent = -1;
+    private volatile boolean batteryCharging = false;
+    private volatile boolean batteryKnown = false;
+    private boolean batteryReceiverRegistered = false;
+    private final BroadcastReceiver batteryReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            if (intent != null && Intent.ACTION_BATTERY_CHANGED.equals(intent.getAction())) updateBattery(intent);
+        }
+    };
     private float lastAx, lastAy, lastAz;
     private Thread micThread;
     private AudioRecord mic;
@@ -84,6 +93,12 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
         bitmaps = new LruCache<String, Bitmap>(kb) {
             @Override protected int sizeOf(String key, Bitmap bitmap) { return Math.max(1, bitmap.getByteCount() / 1024); }
         };
+        // ACTION_BATTERY_CHANGED is sticky: registration immediately supplies current status,
+        // then pushes changes when the cable is plugged/unplugged or charge level changes.
+        try {
+            activity.registerReceiver(batteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            batteryReceiverRegistered = true;
+        } catch (Exception ex) { error("Battery monitor: " + ex.getMessage()); }
     }
 
     private final Runnable animationTicker = new Runnable() {
@@ -473,19 +488,39 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
     @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
     @SimpleFunction public void RefreshBattery() {
         Intent i = activity.registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
-        if (i == null) return;
+        if (i != null) updateBattery(i);
+    }
+    private void updateBattery(Intent i) {
         int level = i.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
-        int scale = Math.max(1, i.getIntExtra(BatteryManager.EXTRA_SCALE, 100));
-        int pct = (int) (100.0 * level / scale);
-        int state = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
-        boolean charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL;
-        BatteryChanged(pct, charging);
-        if (charging) changeEmotion("charging", true, 1200, 2);
-        else if (pct < 15) changeEmotion("low_battery", true, 2000, 2);
+        int scale = i.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+        if (level < 0 || scale <= 0) return;
+        final int pct = Math.max(0, Math.min(100, (int)(100.0 * level / scale)));
+        int status = i.getIntExtra(BatteryManager.EXTRA_STATUS, -1);
+        final boolean charging = status == BatteryManager.BATTERY_STATUS_CHARGING
+                || status == BatteryManager.BATTERY_STATUS_FULL;
+        final boolean first = !batteryKnown;
+        final boolean changed = !first && batteryCharging != charging;
+        final boolean levelChanged = !first && batteryPercent != pct;
+        batteryKnown = true;
+        batteryPercent = pct;
+        batteryCharging = charging;
+        main.post(new Runnable() { @Override public void run() {
+            if (disposed) return;
+            if (first || changed || levelChanged) BatteryChanged(pct, charging);
+            // A new charging connection briefly shows the charging expression.
+            // The persistent charging/low-battery badge is independent of the emotion.
+            if (changed && charging) changeEmotion("charging", true, 1800, 10);
+            else if (changed && !charging && emotion.equals("charging")) changeEmotion("Idle", true, 0, 10);
+            if (face != null) face.invalidate();
+        } });
     }
     @Override public void onDestroy() {
         disposed = true;
         main.removeCallbacks(animationTicker);
+        if (batteryReceiverRegistered) {
+            try { activity.unregisterReceiver(batteryReceiver); } catch (Exception ignored) { }
+            batteryReceiverRegistered = false;
+        }
         EnableSensors(false);
         Disconnect();
         network.shutdownNow(); decoder.shutdownNow(); audioQueue.shutdownNow();
@@ -552,6 +587,9 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             canvas.save();float scale=Math.min(w/400f,h/270f);canvas.translate(w/2f,h/2f);canvas.scale(scale,scale);
             float t=(SystemClock.uptimeMillis()-origin)/1000f;
             String e=emotion;
+            // Low battery changes only the idle face into a sad expression;
+            // explicit emotions from Gemini/Kodular still work normally.
+            if (batteryKnown && !batteryCharging && batteryPercent < 30 && e.equals("Idle")) e="sad";
             int col=(e.equals("angry")||e.equals("love"))?(e.equals("angry")?red:pink):cyan;
             float bob=(float)Math.sin(t*2.0)*2.2f;
             if(e.equals("excited")||e.equals("charged"))bob=(float)Math.sin(t*7)*4;
@@ -635,6 +673,31 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             if(e.equals("shy")){
                 for(int i=0;i<3;i++)oval(canvas,-130+i*14,53,3,3,pink,7);
                 for(int i=0;i<3;i++)oval(canvas,102+i*14,53,3,3,pink,7);
+            }
+            // Always-on status badge, drawn over the avatar in the upper-right.
+            if (batteryKnown && (batteryCharging || batteryPercent < 30)) {
+                final int badgeColor = batteryCharging ? 0xFF36FFB0 : 0xFFFF667A;
+                float bx=148f, by=-95f;
+                stroke(badgeColor,4,10);
+                rect.set(bx-21,by-14,bx+17,by+14);
+                canvas.drawRoundRect(rect,4,4,p);
+                fill(badgeColor,5);
+                rect.set(bx+18,by-5,bx+23,by+5);
+                canvas.drawRoundRect(rect,2,2,p);
+                if (batteryCharging) {
+                    path.reset();
+                    path.moveTo(bx+2,by-11);path.lineTo(bx-9,by+3);
+                    path.lineTo(bx,by+3);path.lineTo(bx-5,by+12);
+                    path.lineTo(bx+12,by-4);path.lineTo(bx+3,by-4);path.close();
+                    canvas.drawPath(path,p);
+                } else {
+                    rect.set(bx-17,by-10,bx-17+Math.max(2,30*batteryPercent/100),by+10);
+                    canvas.drawRoundRect(rect,2,2,p);
+                    p.setShadowLayer(0,0,0,0);
+                    p.setColor(badgeColor);p.setStyle(Paint.Style.FILL);
+                    p.setTextSize(16);p.setTextAlign(Paint.Align.CENTER);
+                    canvas.drawText("!",bx,by+6,p);
+                }
             }
             canvas.restore();
         }
