@@ -688,7 +688,7 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
                     int size = payload.length;
                     if (size < 126) output.write(0x80 | size);
                     else if (size <= 65535) { output.write(0x80 | 126); output.write((size >>> 8) & 255); output.write(size & 255); }
-                    else { output.write(0x80 | 127); for (int i = 7; i >= 0; i--) output.write(((long) size >>> (8 * i)) & 255); }
+                    else { output.write(0x80 | 127); for (int i = 7; i >= 0; i--) output.write((int) (((long) size >>> (8 * i)) & 255L)); }
                     byte[] mask = new byte[4]; random.nextBytes(mask); output.write(mask);
                     byte[] data = new byte[size]; for (int i = 0; i < size; i++) data[i] = (byte) (payload[i] ^ mask[i & 3]);
                     output.write(data); output.flush();
