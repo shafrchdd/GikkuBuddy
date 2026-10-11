@@ -40,7 +40,7 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /** GikkuBuddy: lightweight native-only Kodular extension; remote assets, Gemini Live, sensors. */
-@DesignerComponent(version = 8, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
+@DesignerComponent(version = 9, description = "GikkuBuddy v4: procedural glowing-eye emotions drawn in Java; no frame downloads, Gemini Live audio and sensors", category = ComponentCategory.EXTENSION, nonVisible = true, iconName = "")
 @SimpleObject(external = true)
 @UsesPermissions(permissionNames = "android.permission.INTERNET,android.permission.RECORD_AUDIO,android.permission.MODIFY_AUDIO_SETTINGS,android.permission.VIBRATE")
 public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEventListener, OnDestroyListener {
@@ -380,25 +380,49 @@ public class DeskBuddy extends AndroidNonvisibleComponent implements SensorEvent
             scheduleRetry("Connection setup: " + e.getMessage());
         }
     }
+    // Match the setup envelope used by the user's proven GeminiLive extension.
+    // Keep advanced function calling opt-in so an unsupported tool schema cannot
+    // prevent a basic audio session from establishing.
+    private boolean enableEmotionTools = false;
+    @SimpleFunction(description = "Enable Gemini emotion function calling on the next connection. Off by default for compatibility with the proven GeminiLive setup.")
+    public void EnableEmotionTools(boolean enabled) { enableEmotionTools = enabled; }
     private void sendSetup() {
         try {
-            JSONObject config = new JSONObject().put("responseModalities", new JSONArray().put("AUDIO"));
-            JSONObject speech = new JSONObject().put("voiceConfig", new JSONObject().put("prebuiltVoiceConfig", new JSONObject().put("voiceName", voice)));
-            config.put("speechConfig", speech);
-            JSONObject def = new JSONObject().put("name", "set_emotion").put("description", "Change GikkuBuddy's facial emotion to fit the conversation; use only when appropriate.");
-            JSONObject props = new JSONObject().put("emotion", new JSONObject().put("type", "STRING").put("enum", new JSONArray(Arrays.asList(EMOTIONS))));
-            props.put("duration_ms", new JSONObject().put("type", "INTEGER").put("description", "How long to play this emotion (500 to 10000 milliseconds)"));
-            def.put("parameters", new JSONObject().put("type", "OBJECT").put("properties", props).put("required", new JSONArray().put("emotion")));
-            JSONObject setup = new JSONObject().put("model", "models/" + model).put("generationConfig", config);
-            setup.put("systemInstruction", new JSONObject().put("parts", new JSONArray().put(new JSONObject().put("text", prompt))));
-            setup.put("tools", new JSONArray().put(new JSONObject().put("functionDeclarations", new JSONArray().put(def))));
+            JSONObject body = new JSONObject();
+            body.put("model", "models/" + model);
+            JSONObject generationConfig = new JSONObject();
+            generationConfig.put("responseModalities", new JSONArray().put("AUDIO"));
+            JSONObject prebuilt = new JSONObject().put("voiceName", voice);
+            JSONObject speechConfig = new JSONObject().put("voiceConfig",
+                new JSONObject().put("prebuiltVoiceConfig", prebuilt));
+            generationConfig.put("speechConfig", speechConfig);
+            body.put("generationConfig", generationConfig);
+            if (prompt != null && !prompt.trim().isEmpty()) {
+                body.put("systemInstruction", new JSONObject().put("parts",
+                    new JSONArray().put(new JSONObject().put("text", prompt))));
+            }
+            if (enableEmotionTools) {
+                JSONObject def = new JSONObject().put("name", "set_emotion")
+                    .put("description", "Change GikkuBuddy's facial emotion.");
+                JSONObject props = new JSONObject().put("emotion",
+                    new JSONObject().put("type", "STRING").put("enum", new JSONArray(Arrays.asList(EMOTIONS))));
+                props.put("duration_ms", new JSONObject().put("type", "INTEGER"));
+                def.put("parameters", new JSONObject().put("type", "OBJECT")
+                    .put("properties", props).put("required", new JSONArray().put("emotion")));
+                body.put("tools", new JSONArray().put(new JSONObject()
+                    .put("functionDeclarations", new JSONArray().put(def))));
+            }
+            body.put("inputAudioTranscription", new JSONObject());
+            body.put("outputAudioTranscription", new JSONObject());
             NativeWebSocket ws = socket;
-            if (ws == null || !ws.send(new JSONObject().put("setup", setup).toString())) {
+            if (ws == null || !ws.send(new JSONObject().put("setup", body).toString())) {
                 String why = ws == null ? "Socket missing" : ws.sendError();
                 status("send_failed", why);
                 error("Gemini setup send failed: " + why);
                 if (ws != null) ws.close();
-            } else status("awaiting_setup", "Setup frame sent; waiting for Google's setupComplete");
+            } else {
+                status("awaiting_setup", "Setup frame sent using proven GeminiLive format");
+            }
         } catch (Exception e) {
             status("setup_error", e.toString());
             error("Gemini setup: " + e.getMessage());
