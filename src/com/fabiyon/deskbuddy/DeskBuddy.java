@@ -28,10 +28,12 @@ import com.google.appinventor.components.runtime.EventDispatcher;
 import org.json.*;
 
 import java.io.*;
+import java.io.File;
 import java.net.*;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.*;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.zip.*;
 import javax.net.ssl.SSLSocket;
