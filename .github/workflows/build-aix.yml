@@ -1,0 +1,28 @@
+name: Build GikkuBuddy AIX
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Kodular extension
+        id: build
+        uses: pavi2410/AIX-Action@main
+        with:
+          source-dir: src
+          package-name: com.fabiyon.deskbuddy
+          appinventor-repo: mit-cml/appinventor-sources
+          appinventor-branch: master
+      - name: Upload compiled AIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: GikkuBuddy-AIX
+          path: ${{ steps.build.outputs.extension-path }}
+          if-no-files-found: error
